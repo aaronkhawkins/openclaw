@@ -25,6 +25,7 @@ import { annotateInterSessionPromptText } from "../../sessions/input-provenance.
 import { MEDIA_ONLY_USER_TEXT } from "../../sessions/user-turn-media.js";
 import { hasControlCommand } from "../command-detection.js";
 import {
+  isExplicitFollowupCommandTurn,
   isNativeCommandTurn,
   isTextSlashCommandTurn,
   resolveCommandTurnContext,
@@ -286,7 +287,8 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
     normalizedCommandBody === rawBodyTrimmed.toLowerCase();
   const isResetOrNewCommand = /^\/(new|reset)(?:\s|$)/i.test(normalizedCommandBody);
   const commandTurn = resolveCommandTurnContext(ctx);
-  const canInterpretCommands = ctx.CommandInterpretationSuppressed !== true;
+  const canInterpretCommands =
+    ctx.CommandInterpretationSuppressed !== true && !isExplicitFollowupCommandTurn(ctx);
   const isRegisteredWholeMessageCommand =
     isWholeMessageCommand && (hasControlCommand(rawBodyTrimmed, cfg) || isResetOrNewCommand);
   const isActiveCommandTurn =
