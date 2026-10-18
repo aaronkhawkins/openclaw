@@ -10,9 +10,13 @@ import { parseDecisionEvaluateInput } from "../src/agents/tools/decision-tool-co
 import { createDecisionTool } from "../src/agents/tools/decision-tool.js";
 import { withGatewayToolCallerIdentity } from "../src/agents/tools/gateway-caller-context.js";
 import { resolveConfigWidePluginManifestRegistry } from "../src/config/io.plugin-metadata.js";
-import { clearRuntimeConfigSnapshot } from "../src/config/runtime-snapshot.js";
+import {
+  clearRuntimeConfigSnapshot,
+  getRuntimeConfigSnapshot,
+} from "../src/config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
 import {
+  evaluateDecisionInRegistry,
   inspectDecisionProviders,
   prepareDecisionProviderReload,
 } from "../src/decisions/runtime.js";
@@ -34,6 +38,7 @@ import { createColdPluginHermeticEnv } from "../src/plugins/test-helpers/cold-pl
 import {
   activateSecretsRuntimeSnapshot,
   clearSecretsRuntimeSnapshot,
+  getActiveSecretsRuntimeSnapshotRevision,
   prepareSecretsRuntimeSnapshot,
 } from "../src/secrets/runtime.js";
 import { createDeferredCore } from "../src/shared/deferred.js";
@@ -51,8 +56,17 @@ const batch: DecisionBatch = {
 };
 const nativeUrl = "https://api.subq.ai/v1/systemone";
 
-it.each(["allowed", "model-denied", "consumer-revoked"] as const)(
-  "checks the real SubQ host authority before HTTP (%s)",
+const changes = [
+  "allowed",
+  "model-denied",
+  "consumer-revoked",
+  "core-allowed",
+  "secret-replaced",
+  "secret-removed",
+] as const;
+
+it.each(changes)(
+  "checks the real SubQ host authority and final network dispatch after DNS preparation (%s)",
   async (change) => {
     const state = await createOpenClawTestState({ label: "subq-authority", applyEnv: false });
     const emptyBundled = state.path("bundled");
@@ -159,6 +173,9 @@ it.each(["allowed", "model-denied", "consumer-revoked"] as const)(
                   }),
                 });
                 activateSecretsRuntimeSnapshot(snapshot);
+                const secretRevision = getActiveSecretsRuntimeSnapshotRevision();
+                const runtimeConfig = getRuntimeConfigSnapshot();
+                assert(runtimeConfig);
                 builder = createRuntimeTestRegistry(createPluginRuntime());
                 provider = createPluginRecord({
                   ...manifest,
@@ -255,8 +272,28 @@ it.each(["allowed", "model-denied", "consumer-revoked"] as const)(
                 });
                 const tool = createDecisionTool("main", { config: cfg });
                 assert(tool);
-                const invoke: () => Promise<unknown> = () =>
-                  change === "consumer-revoked"
+                const invoke: () => Promise<unknown> = () => {
+                  const options = {
+                    purpose: "owner-proof",
+                    rubricVersion: "1",
+                    timeoutMs: 5000,
+                    signal: controller.signal,
+                  };
+                  if (
+                    change === "core-allowed" ||
+                    change === "secret-replaced" ||
+                    change === "secret-removed"
+                  ) {
+                    // No caller predicate: the V1 host itself must fence changed secrets
+                    // after DNS preparation, before the adapter's physical request.
+                    return evaluateDecisionInRegistry(
+                      batch,
+                      options,
+                      builder!.registry,
+                      runtimeConfig,
+                    );
+                  }
+                  return change === "consumer-revoked"
                     ? consumerApi.runtime.decisions.evaluate(batch, {
                         purpose: "owner-proof",
                         rubricVersion: "1",
@@ -264,6 +301,7 @@ it.each(["allowed", "model-denied", "consumer-revoked"] as const)(
                         signal: controller.signal,
                       })
                     : tool.execute("owner-proof", batch, controller.signal);
+                };
                 pending = withGatewayToolCallerIdentity(
                   {
                     agentId: "main",
@@ -279,14 +317,22 @@ it.each(["allowed", "model-denied", "consumer-revoked"] as const)(
                 if (change === "model-denied") {
                   await expect(pending).rejects.toThrow("cannot use this model");
                   expect(forwarding).not.toHaveBeenCalled();
+                  expect(received).toHaveLength(0);
                 } else {
                   await Promise.race([
                     entered.promise,
-                    settled.then(() => {
-                      throw new Error("SubQ settled before DNS preparation");
+                    settled.then((outcome) => {
+                      const detail =
+                        "error" in outcome && outcome.error instanceof Error
+                          ? { name: outcome.error.name, message: outcome.error.message }
+                          : outcome;
+                      throw new Error(
+                        `SubQ settled before DNS preparation: ${JSON.stringify(detail)}`,
+                      );
                     }),
                   ]);
                   expect(received).toHaveLength(0);
+                  expect(getActiveSecretsRuntimeSnapshotRevision()).toBe(secretRevision);
                   if (change === "consumer-revoked") {
                     const instance = getPluginInstance(consumer);
                     assert(instance);
@@ -294,10 +340,37 @@ it.each(["allowed", "model-denied", "consumer-revoked"] as const)(
                     expect(instance.disposing).toBe(true);
                     expect(instance.acceptingCalls).toBe(false);
                     expect(instance.owner?.revoked).toBe(true);
+                  } else if (change === "secret-replaced") {
+                    activateSecretsRuntimeSnapshot(
+                      await prepareSecretsRuntimeSnapshot({
+                        config: cfg,
+                        env: { ...process.env, SUBQ_API_KEY: "synthetic-subq-replacement" },
+                        includeConfigRefs: true,
+                        includeAuthStoreRefs: false,
+                        manifestRegistry: resolveConfigWidePluginManifestRegistry({
+                          config: cfg,
+                          env: process.env,
+                        }),
+                      }),
+                    );
+                    expect(getActiveSecretsRuntimeSnapshotRevision()).toBeGreaterThan(
+                      secretRevision,
+                    );
+                  } else if (change === "secret-removed") {
+                    clearSecretsRuntimeSnapshot();
+                    expect(getActiveSecretsRuntimeSnapshotRevision()).toBeGreaterThan(
+                      secretRevision,
+                    );
                   }
+                  expect(controller.signal.aborted).toBe(false);
                   release.resolve();
                   const outcome = await settled;
-                  expect(finalAdmission).toBe(change === "allowed" ? "allowed" : "rejected");
+                  expect(received).toHaveLength(
+                    change === "allowed" || change === "core-allowed" ? 1 : 0,
+                  );
+                  expect(finalAdmission).toBe(
+                    change === "allowed" || change === "core-allowed" ? "allowed" : "rejected",
+                  );
                   if (change === "allowed") {
                     assert("result" in outcome);
                     const result = outcome.result as Awaited<ReturnType<typeof tool.execute>>;
@@ -317,14 +390,26 @@ it.each(["allowed", "model-denied", "consumer-revoked"] as const)(
                       model: "subq-snap-preview",
                       questions: { urgent: { type: "noul" } },
                     });
-                  } else {
+                  } else if (change === "core-allowed") {
+                    expect(outcome).toMatchObject({
+                      result: {
+                        status: "ok",
+                        result: { answers: { urgent: { type: "boolean" } } },
+                      },
+                    });
+                    expect(received[0]?.authorization).toBe("Bearer synthetic-subq-key");
+                  } else if (change === "consumer-revoked") {
                     expect(outcome).toHaveProperty("error");
                     expect(await disposal).toEqual({ errors: [] });
+                  } else {
+                    expect(outcome).toEqual({
+                      result: { status: "unavailable", reason: "retiring" },
+                    });
                   }
                 }
-                expect(received).toHaveLength(change === "allowed" ? 1 : 0);
                 expect(inspectDecisionProviders(cfg, builder.registry)[0]).toMatchObject({
-                  callable: true,
+                  callable: change !== "secret-removed",
+                  credentialReady: change !== "secret-removed",
                   activeRequests: 0,
                 });
                 console.info(JSON.stringify({ change, finalAdmission, requests: received.length }));
