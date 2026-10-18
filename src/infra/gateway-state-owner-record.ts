@@ -37,8 +37,10 @@ export function isGatewayStateOwnerDefinitelyStale(value: unknown, lockPath: str
 }
 
 export {
+  GatewayStateOwnerContentionError,
   StateDatabaseAccessError,
   StateDatabaseAdmissionPendingError,
+  StateDatabaseMaintenanceScopeError,
   StateDatabaseOfflineMaintenanceError,
 } from "./gateway-state-owner-errors.js";
 
@@ -92,7 +94,7 @@ export function assertPersistedStateDatabaseAccessAllowed(params: {
     assertMaintenance();
     return;
   }
-  const maintenancePending = `OpenClaw state at ${databasePath} is undergoing offline maintenance; retry when it finishes.`;
+  const maintenancePending = `OpenClaw state at ${databasePath} is undergoing offline maintenance by ${role} process ${owner.pid}; retry when it finishes.`;
   if (owner.stateOwnerKind === "schema" && owner.role === "sqlite-maintenance") {
     throw new StateDatabaseAdmissionPendingError(databasePath, maintenancePending);
   }
