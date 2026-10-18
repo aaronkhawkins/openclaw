@@ -304,16 +304,11 @@ describe("host-prepared embedded tool authority", () => {
         const releaseQueue = createDeferred();
         let queueReturned = false;
         handle.supportsTranscriptCommitWait = true;
-        handle.messageInjectionV2 = {
-          version: 2,
-          isAvailable: () => true,
-          queueMessage: async (_text, options, assertCurrent) => {
-            assertCurrent();
-            options?.onQueueAccepted?.(true);
-            await releaseQueue.promise;
-            queueReturned = true;
-          },
-        };
+        interceptMessages(handle, async (_text, options) => {
+          options?.onQueueAccepted?.(true);
+          await releaseQueue.promise;
+          queueReturned = true;
+        });
         const incoming: ReplyToolAuthorityOverlay = {
           ...own,
           operatorAuthority: authority("bob"),
@@ -324,11 +319,8 @@ describe("host-prepared embedded tool authority", () => {
         };
         let pending: Awaited<ReturnType<typeof beginReplyMessageInjectionTarget>> | undefined;
         try {
-          const target = replyRunRegistry.resolveCurrentMessageInjectionTarget(sessionKey);
+          const target = currentTarget();
           expect(replyRunRegistry.get(sessionKey)).toBeUndefined();
-          if (!target) {
-            throw new Error("Expected the direct admitted owner to be injectable");
-          }
           pending = await beginReplyMessageInjectionTarget(target, "Change my view", {
             isInboundUserMessage: true,
             toolAuthorityOverlay: incoming,
@@ -437,21 +429,13 @@ describe("host-prepared embedded tool authority", () => {
         const entered = createDeferred();
         const release = createDeferred();
         handle.supportsTranscriptCommitWait = true;
-        handle.messageInjectionV2 = {
-          version: 2,
-          isAvailable: () => true,
-          queueMessage: async (text, options, assertCurrent) => {
-            assertCurrent();
-            entered.resolve();
-            await release.promise;
-            assertCurrent();
-            return queue(text, options);
-          },
-        };
-        const target = replyRunRegistry.resolveCurrentMessageInjectionTarget(sessionKey);
-        if (!target) {
-          throw new Error("Expected the direct admitted owner to be injectable");
-        }
+        interceptMessages(handle, async (text, options, assertCurrent) => {
+          entered.resolve();
+          await release.promise;
+          assertCurrent();
+          return queue(text, options);
+        });
+        const target = currentTarget();
         const origin = getGatewayToolCallerIdentity()?.requesterOrigin;
         if (!origin) {
           throw new Error("Expected captured requester facts");
@@ -662,11 +646,7 @@ describe("host-prepared embedded tool authority", () => {
             }
             return { ...own, messageProvider: "discord-voice" };
           });
-          const pending = controlRealtimeVoiceAgentRun({
-            sessionKey,
-            text: "cancel",
-            getToolAuthorityOverlay: validateAdmission,
-          });
+          const pending = voiceControl(validateAdmission, "cancel");
           if (admission === "revoked") {
             await expect(pending).rejects.toThrow("Voice admission was revoked");
             expect(abort).not.toHaveBeenCalled();
