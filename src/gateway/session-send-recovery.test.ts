@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import { WorkerTaskError } from "@openclaw/worker-runtime";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GatewayClientRequestError } from "../../packages/gateway-client/src/request-error.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../test/helpers/promise.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
@@ -9,7 +10,15 @@ import {
 import type { SessionPendingInput } from "../config/sessions/session-pending-input.types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { SqliteWorkerError } from "../infra/sqlite-worker-contract.js";
-import { AgentDatabaseAdmissionError } from "../state/agent-database-admission.js";
+import {
+  AgentDatabaseAdmissionError,
+  createAgentDatabaseInspectionRefusal,
+  failPendingAgentDatabase,
+  preparePendingAgentDatabase,
+  readAgentDatabaseAdmissionRefusal,
+  recordAgentDatabaseAdmissions,
+} from "../state/agent-database-admission.js";
+import { withAgentDatabasePreparationContext } from "../state/agent-database-preparation-context.js";
 import { createDirectChatContext } from "./server-chat.agent-events.test-helpers.js";
 import { createMockGatewayRecoveryRuntime } from "./server-recovery-runtime.test-support.js";
 import { createGatewayStartupTrace } from "./server-startup-trace.js";
@@ -180,7 +189,103 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   clearRuntimeConfigSnapshot();
+  recordAgentDatabaseAdmissions([]);
 });
+
+it("recovers a logical agent's saved input from its shared physical store", async () => {
+  const sharedDelivery = {
+    ...delivery,
+    target: { ...delivery.target, agentId: "secondary", sessionKey: "agent:secondary:target" },
+  };
+  const sharedInput = {
+    ...input,
+    message: { ...input.message, __openclaw: { sessionSendDelivery: sharedDelivery } },
+  };
+  io.entries.mockResolvedValue([
+    { sessionKey: sharedDelivery.target.sessionKey, entry: targetEntry },
+  ]);
+  io.pending.mockResolvedValue({ items: [sharedInput], total: 1 });
+  io.source.mockResolvedValue(sourceSnapshot(sharedInput));
+  io.load.mockImplementation(async ({ key }: { key: string }) => ({
+    ...storeTarget(key),
+    agentId: key === sharedDelivery.target.sessionKey ? "secondary" : "main",
+  }));
+  await recover();
+  expect(dispatch).toHaveBeenCalledOnce();
+  expect(dispatch.mock.calls[0]![0]).toMatchObject({
+    agentId: "secondary",
+    idempotencyKey: delivery.runId,
+  });
+  expect(io.source.mock.calls[0]![0]).toMatchObject({
+    agentId: "secondary",
+    storePath: "/fixture/sessions.json",
+  });
+  expectNoCalls(io.report, io.withdraw, warn);
+});
+
+it.each(["admitted", "failed", "cancelled"] as const)(
+  "recovers a skipped store after its admission owner settles: %s",
+  async (outcome) => {
+    const refusal = createAgentDatabaseInspectionRefusal({
+      agentId: "main",
+      paths: ["/fixture/sessions.json"],
+      reason: "Synthetic startup inspection",
+      pending: true,
+    });
+    recordAgentDatabaseAdmissions([refusal]);
+    io.discover.mockImplementation(async () =>
+      readAgentDatabaseAdmissionRefusal("main")
+        ? []
+        : [{ agentId: "main", storePath: "/fixture/sessions.json" }],
+    );
+    const joined = createDeferred();
+    const prepared = createDeferred();
+    const cancellation = controller();
+    const recovery = withAgentDatabasePreparationContext(
+      () => ({
+        waitForAgentPreparation: () => {
+          joined.resolve();
+          return prepared.promise;
+        },
+      }),
+      () => recover(cancellation.signal),
+    );
+    try {
+      await awaitGateBeforeSettlement(
+        joined.promise,
+        recovery,
+        "saved-input recovery finished without joining pending store admission",
+      );
+      expectNoCalls(dispatch, io.report);
+      if (outcome === "failed") {
+        failPendingAgentDatabase(refusal, new Error("Synthetic inspection failure"), {});
+      } else {
+        await preparePendingAgentDatabase(refusal, { assertCurrent() {} }, async () => {});
+      }
+      if (outcome === "cancelled") {
+        cancellation.abort();
+      }
+      prepared.resolve();
+      if (outcome === "cancelled") {
+        await expect(recovery).rejects.toThrow();
+      } else {
+        await recovery;
+      }
+      if (outcome === "admitted") {
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(dispatch.mock.calls[0]![0].idempotencyKey).toBe(delivery.runId);
+        expect(io.discover.mock.calls[1]![0].agentIds).toEqual(new Set(["main"]));
+      } else {
+        expectNoCalls(dispatch);
+        expect(io.discover).toHaveBeenCalledOnce();
+      }
+      expectNoCalls(io.report);
+    } finally {
+      prepared.resolve();
+      await recovery.catch(() => {});
+    }
+  },
+);
 
 it.each(["replaced", "archived-source", "archived-target"] as const)(
   "settles %s inputs durably so the second restart is silent",
