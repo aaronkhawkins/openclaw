@@ -565,6 +565,8 @@ export const OpenClawSchemaShape = {
               mode: z.union([z.literal("off"), z.literal("propose"), z.literal("auto")]).optional(),
             })
             .optional(),
+          /** Workshop owner -> existing agent authorized to run its weekly collection audit. */
+          reviewRunners: z.record(z.string().min(1), z.string().trim().min(1)).optional(),
           /** Whether proposal lifecycle actions need explicit approval. */
           approvalPolicy: z.union([z.literal("pending"), z.literal("auto")]).optional(),
           /** Maximum pending/quarantined proposals retained per workspace. */

@@ -84,3 +84,35 @@ the page that now holds the content.
   basics
 - [Skills config](/tools/skills-config) for the full `skills.workshop` schema
 - [Skills CLI](/cli/skills) for `openclaw skills` commands
+
+## Weekly review runners
+
+On versions with weekly collection reviews, an operator can route a specific
+Workshop's maintenance to an existing authorized agent:
+
+```json5
+{
+  skills: {
+    workshop: {
+      reviewRunners: { ops: "maintenance" },
+    },
+  },
+}
+```
+
+The declaration, schedule phase, and Workshop directory still belong to `ops`.
+Only execution uses `maintenance`, with that agent's existing tool and execution
+policy; the operational agent gains no tools or permissions. The runner must
+already support reading files, enumerating directories through `exec`, and
+editing files. Configured prerequisites are checked against the primary model's
+policies, including the isolated session's sandbox restrictions. Unknown or
+incapable explicit runners disable the affected review with a prerequisite
+diagnostic. Actual runtime admission still governs session overrides, fallback
+models, and tool availability. Other owners keep their existing routes.
+
+Verify a route through its system-owned automation: inspect the owner declaration,
+run it once for an empty Workshop, then audit a small fixture with distinct skills
+and a supporting file. Check the trajectory for complete enumeration, file reads,
+and actual per-skill decisions. A completed model invocation alone does not prove
+the collection was reviewed. Keep fixture evidence separate from later normal
+scheduled execution evidence.

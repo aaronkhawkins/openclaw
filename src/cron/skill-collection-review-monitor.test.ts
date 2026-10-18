@@ -55,6 +55,68 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
     );
   });
 
+  it("routes one owner's audit without changing its identity, cadence, or operational policy", () => {
+    const cfg = {
+      agents: {
+        defaults: { model: "anthropic/claude-sonnet-4-6" },
+        entries: {
+          ops: { tools: { allow: ["read", "write", "edit"], exec: { mode: "deny" } } },
+          maintenance: { tools: { profile: "coding", exec: { mode: "auto" } } },
+        },
+      },
+    } satisfies OpenClawConfig;
+    const before = Array.from(
+      resolveSkillCollectionReviewMonitorSpecs(cfg, [], { schedulerSeed: "stable" }),
+    );
+    const routed = { ...cfg, skills: { workshop: { reviewRunners: { ops: "maintenance" } } } };
+    const after = Array.from(
+      resolveSkillCollectionReviewMonitorSpecs(routed, [], { schedulerSeed: "stable" }),
+    );
+    expect(after[0]?.input).toEqual({ ...before[0]?.input, agentId: "maintenance" });
+    expect(after[1]).toEqual(before[1]);
+    expect(routed.agents.entries.ops.tools).toEqual(cfg.agents.entries.ops.tools);
+  });
+
+  it.each([
+    "missing",
+    "read-denied",
+    "exec-denied",
+    "write-denied",
+    "sandbox-denied",
+    "provider-denied",
+  ])("disables an explicit route with unmet prerequisites: %s", (failure) => {
+    const cfg = {
+      agents: {
+        defaults: { model: "anthropic/claude-sonnet-4-6" },
+        entries: {
+          ops: {},
+          maintenance: {
+            sandbox: { mode: failure === "sandbox-denied" ? "non-main" : "off" },
+            tools: {
+              sandbox: { tools: { deny: failure === "sandbox-denied" ? ["exec"] : [] } },
+              byProvider: { anthropic: { deny: failure === "provider-denied" ? ["read"] : [] } },
+              profile: "coding",
+              deny:
+                failure === "read-denied"
+                  ? ["read"]
+                  : failure === "write-denied"
+                    ? ["write", "apply_patch"]
+                    : [],
+              exec: { mode: failure === "exec-denied" ? "deny" : "auto" },
+            },
+          },
+        },
+      },
+      skills: {
+        workshop: { reviewRunners: { ops: failure === "missing" ? "absent" : "maintenance" } },
+      },
+    } satisfies OpenClawConfig;
+    const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, []);
+    expect(spec?.input.enabled).toBe(false);
+    expect(spec?.input.agentId).toBe("ops");
+    expect(spec?.input.displayName).toContain("runner-prerequisite");
+  });
+
   it("creates jobs for every agent in an explicit fleet", () => {
     const explicitFleet = {
       agents: { ownership: "explicit", entries: { ops: {}, research: {} } },

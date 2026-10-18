@@ -6,6 +6,10 @@ import {
   resolveSubagentModelConfigSelectionResult,
   resolveSubagentModelFallbacksOverride,
 } from "../agents/agent-scope.js";
+import {
+  resolveConfiguredToolPolicies,
+  resolveEffectiveToolPolicy,
+} from "../agents/agent-tools.policy.js";
 import { resolveAvailableAgentHarnessPolicy } from "../agents/harness/availability.js";
 import { resolveModelCandidateChain } from "../agents/model-fallback-candidates.js";
 import { resolveCliRuntimeExecutionProvider } from "../agents/model-runtime-aliases.js";
@@ -17,6 +21,8 @@ import {
   normalizeModelSelection,
   resolveModelRefFromString,
 } from "../agents/model-selection-shared.js";
+import { isToolAllowedByPolicies } from "../agents/tool-policy-match.js";
+import { mergeAlsoAllowPolicy, resolveToolProfilePolicy } from "../agents/tool-policy.js";
 import {
   resolveAgentModelFallbackValues,
   resolveAgentModelPrimaryValue,
@@ -42,6 +48,61 @@ import type { CronJob, CronJobCreate } from "./types.js";
 
 const SKILL_COLLECTION_REVIEW_EVERY_MS = 7 * 24 * 60 * 60_000;
 const SKILL_COLLECTION_REVIEW_NO_ROOTED_RUNTIME_REASON = "no-rooted-runtime";
+
+/** An explicit maintenance route borrows an existing agent's policy, never the owner's. */
+export function resolveSkillCollectionReviewRunner(
+  cfg: OpenClawConfig,
+  ownerId: string,
+): {
+  agentId: string;
+  error?: string;
+} {
+  const agentId = cfg.skills?.workshop?.reviewRunners?.[ownerId] ?? ownerId;
+  if (!listAgentIds(cfg).includes(agentId)) {
+    return { agentId, error: `Workshop review runner ${agentId} is not configured.` };
+  }
+  // Existing self-routed monitors retain their admission behavior. Explicit routes
+  // must prove their prerequisites before reconciliation assigns recurring work.
+  if (cfg.skills?.workshop?.reviewRunners?.[ownerId] !== undefined) {
+    const agent = resolveAgentConfig(cfg, agentId);
+    const model = resolveDefaultModelForAgent({ cfg, agentId, allowPluginNormalization: false });
+    const effective = resolveEffectiveToolPolicy({
+      config: cfg,
+      agentId,
+      modelProvider: model.provider,
+      modelId: model.model,
+    });
+    const sandboxMode = agent?.sandbox?.mode ?? cfg.agents?.defaults?.sandbox?.mode ?? "off";
+    const policies = resolveConfiguredToolPolicies({
+      cfg,
+      agentTools: agent?.tools,
+      agentId,
+      // An isolated automation is non-main, so both sandbox modes apply.
+      sandboxMode: sandboxMode === "off" ? "off" : "all",
+      extraPolicies: [
+        effective.globalProviderPolicy,
+        effective.agentProviderPolicy,
+        mergeAlsoAllowPolicy(
+          resolveToolProfilePolicy(effective.providerProfile),
+          effective.providerProfileAlsoAllow,
+        ),
+      ],
+    });
+    const allows = (name: string) => isToolAllowedByPolicies(name, policies);
+    const execEnabled = (agent?.tools?.exec?.mode ?? cfg.tools?.exec?.mode) !== "deny";
+    if (
+      !allows("read") ||
+      !(execEnabled && allows("exec")) ||
+      !(allows("apply_patch") || (allows("write") && allows("edit")))
+    ) {
+      return {
+        agentId,
+        error: `Workshop review runner ${agentId} requires file reading, directory enumeration via exec, and file editing under its existing tool policy.`,
+      };
+    }
+  }
+  return { agentId };
+}
 
 /** Returns undefined when static config cannot prove the full runtime chain. */
 function hasEligibleSkillCollectionReviewRuntime(
@@ -222,9 +283,10 @@ export function* resolveSkillCollectionReviewMonitorSpecs(
   const manifestPlugins =
     getCurrentPluginMetadataSnapshot({ config: cfg, allowWorkspaceScopedSnapshot: true }) ?? [];
   for (const agentId of listAgentIds(cfg)) {
+    const runner = resolveSkillCollectionReviewRunner(cfg, agentId);
     const configuredEligibility = hasEligibleSkillCollectionReviewRuntime(
       cfg,
-      agentId,
+      runner.agentId,
       manifestPlugins,
     );
     const existing = retained.get(agentId);
@@ -233,20 +295,22 @@ export function* resolveSkillCollectionReviewMonitorSpecs(
     const hasEligibleRuntime =
       configuredEligibility === false &&
       existing &&
-      hasStoredExecutionPreference(cfg, agentId, existing.id)
+      hasStoredExecutionPreference(cfg, runner.agentId, existing.id)
         ? undefined
         : configuredEligibility;
-    const enabled = workshopEnabled && hasEligibleRuntime !== false;
+    const enabled = workshopEnabled && !runner.error && hasEligibleRuntime !== false;
     yield {
       agentId,
       input: {
         declarationKey: `${SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX}${agentId}`,
         name: `skill-collection-review-${agentId}`,
         displayName:
-          workshopEnabled && hasEligibleRuntime === false
-            ? `[${SKILL_COLLECTION_REVIEW_NO_ROOTED_RUNTIME_REASON}] Skill collection review (${agentId})`
-            : `Skill collection review (${agentId})`,
-        agentId,
+          workshopEnabled && runner.error
+            ? `[runner-prerequisite] Skill collection review (${agentId}): ${runner.error}`
+            : workshopEnabled && hasEligibleRuntime === false
+              ? `[${SKILL_COLLECTION_REVIEW_NO_ROOTED_RUNTIME_REASON}] Skill collection review (${agentId})`
+              : `Skill collection review (${agentId})`,
+        agentId: runner.error ? agentId : runner.agentId,
         enabled,
         schedule: {
           kind: "every",
