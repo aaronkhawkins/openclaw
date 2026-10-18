@@ -121,7 +121,7 @@ describe("scoped SQLite read-only children", () => {
       let prepared: Awaited<typeof preparation.result> | undefined;
       let fork: Awaited<ReturnType<typeof forkSqlitePrivateSnapshot>> | undefined;
       const assertCurrent = vi.fn();
-      const firstChild = vi.mocked(spawn).mock.results.length;
+      let forkChildren: ReturnType<typeof spawn>[] = [];
       try {
         prepared = await preparation.result;
         const family = prepared.privateFamily;
@@ -146,12 +146,19 @@ describe("scoped SQLite read-only children", () => {
           expect(family.wal).not.toBeNull();
         }
         const privateBytes = familyBytes(prepared.location);
+        // The retained source may start a shared native broker. Only the fork owns
+        // the IPC child whose retirement this fixture must join.
+        const firstChild = vi.mocked(spawn).mock.results.length;
         fork = await forkSqlitePrivateSnapshot(
           prepared.location,
           family,
           new AbortController().signal,
           assertCurrent,
         );
+        forkChildren = vi
+          .mocked(spawn)
+          .mock.results.slice(firstChild)
+          .map(({ value }) => value);
         expect(assertCurrent).toHaveBeenCalledOnce();
         expect(fs.statSync(fork.location).ino).not.toBe(fs.statSync(prepared.location).ino);
         expect(fs.existsSync(`${fork.location}-shm`)).toBe(false);
@@ -190,12 +197,8 @@ describe("scoped SQLite read-only children", () => {
         await preparation.startClose().result;
       }
       expect(fs.existsSync(prepared!.cleanupRoot!)).toBe(false);
-      const children = vi
-        .mocked(spawn)
-        .mock.results.slice(firstChild)
-        .map(({ value }) => value);
-      expect(children.length).toBeGreaterThan(0);
-      for (const child of children) {
+      expect(forkChildren).toHaveLength(1);
+      for (const child of forkChildren) {
         expect(child.connected).toBe(false);
         expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
       }
