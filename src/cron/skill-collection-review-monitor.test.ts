@@ -113,6 +113,7 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
     } satisfies OpenClawConfig;
     const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, []);
     expect(spec?.input.enabled).toBe(false);
+    expect(spec?.input.agentId).toBe("ops");
     expect(spec?.input.displayName).toContain("runner-prerequisite");
   });
 

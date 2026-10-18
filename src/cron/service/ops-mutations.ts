@@ -14,6 +14,7 @@ import { removeCronJobBaseSession } from "../session-reaper.js";
 import { removeStaleCronJobFamilyRows } from "../store.js";
 import {
   isSystemMonitorDeclaration,
+  SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
   systemOwnedDeclarationKeyNamespace,
 } from "../system-owned-declaration.js";
 import type { CronJobCreate, CronJobPatch } from "../types.js";
@@ -136,6 +137,14 @@ export async function add(
     if (existing) {
       const now = state.deps.nowMs();
       const nextJob = cloneCronJobForMutation(existing);
+      // Workshop config owns its maintenance runner. Ordinary declarations and
+      // clients still cannot retarget a job through declarative convergence.
+      if (
+        opts?.systemOwned === true &&
+        declarationKey?.startsWith(SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX)
+      ) {
+        nextJob.agentId = normalizeOptionalAgentId(normalizedInput.agentId);
+      }
       applyDeclarativeJobSpec(nextJob, normalizedInput, {
         defaultAgentId: state.deps.defaultAgentId,
         enabledExplicit: opts?.enabledExplicit === true,
@@ -154,6 +163,13 @@ export async function add(
         scheduleChanged: !isDeepStrictEqual(existing.schedule, nextJob.schedule),
         explicitTriggerState: normalizedInput.state,
       });
+      const ownerPreparation = prepareCronRunReceiptOwnerMutation({
+        state,
+        previousJob: existing,
+        nextJob,
+      });
+      const ownerMutation = ownerPreparation ? await ownerPreparation : undefined;
+      source.assertCurrent();
       const runtimeAuthorityMutation = consumeRuntimeAuthorityMutationOptions(opts);
       reconcileRuntimeAuthority({
         job: nextJob,
@@ -168,6 +184,7 @@ export async function add(
       });
       const includeEnabled = opts?.enabledExplicit === true;
       if (
+        existing.agentId === nextJob.agentId &&
         isDeepStrictEqual(
           declarativeFields(existing, includeEnabled),
           declarativeFields(nextJob, includeEnabled),
@@ -199,6 +216,7 @@ export async function add(
         commitGuard: opts?.commitGuard,
         agentId,
         mutationMethod: "cron.add",
+        ownerMutation,
       });
       return { ...committedJob, created: false, updated: true, job: committedJob };
     }

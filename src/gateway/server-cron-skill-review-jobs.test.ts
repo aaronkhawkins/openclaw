@@ -292,6 +292,95 @@ describe("reconcileSkillCollectionReviewJobs", () => {
     }
   });
 
+  it.each([false, true])(
+    "moves an existing monitor without replacing its identity (active=%s)",
+    async (active) => {
+      const testState = await createOpenClawTestState({ label: "skill-review-reroute" });
+      const cfg = {
+        agents: {
+          ownership: "explicit",
+          entries: { ops: {}, maintenance: { tools: { profile: "coding" } } },
+        },
+        skills: { workshop: { reviewRunners: {} as Record<string, string> } },
+      } satisfies OpenClawConfig;
+      const started = createDeferred();
+      const release = createDeferred();
+      const cron = new CronService({
+        scheduler: createTestGatewayScheduler(),
+        storePath: testState.statePath("cron", "jobs.json"),
+        cronEnabled: false,
+        log: logger,
+        enqueueSystemEvent: vi.fn(),
+        requestHeartbeat: vi.fn(),
+        runIsolatedAgentJob: vi.fn(async () => {
+          started.resolve();
+          await release.promise;
+          return { status: "ok" as const };
+        }),
+      });
+      let running: ReturnType<typeof cron.run> | undefined;
+      try {
+        await reconcileSkillCollectionReviewJobs({ cron, cfg, logger });
+        const before = await cron.list({ includeDisabled: true });
+        const owner = before.find((job) => job.declarationKey === "skill-collection-review:ops");
+        const sibling = before.find(
+          (job) => job.declarationKey === "skill-collection-review:maintenance",
+        );
+        if (!owner || !sibling) {
+          throw new Error("expected both review monitors");
+        }
+        if (active) {
+          running = cron.run(owner.id, "force");
+          await started.promise;
+        }
+        cfg.skills.workshop.reviewRunners = { ops: "maintenance" };
+        if (active) {
+          const activeBeforeRoute = structuredClone(cron.getJob(owner.id));
+          await expect(reconcileSkillCollectionReviewJobs({ cron, cfg, logger })).resolves.toEqual({
+            ok: false,
+          });
+          expect(cron.getJob(owner.id)).toEqual(activeBeforeRoute);
+          release.resolve();
+          await running;
+        }
+        const stateBeforeRoute = Object.fromEntries(
+          Object.entries(cron.getJob(owner.id)?.state ?? {}).filter(
+            ([, value]) => value !== undefined,
+          ),
+        );
+        await expect(reconcileSkillCollectionReviewJobs({ cron, cfg, logger })).resolves.toEqual({
+          ok: true,
+        });
+        const after = await cron.list({ includeDisabled: true });
+        expect(after.find((job) => job.id === owner.id)).toMatchObject({
+          agentId: "maintenance",
+          declarationKey: owner.declarationKey,
+          name: owner.name,
+          schedule: owner.schedule,
+          delivery: owner.delivery,
+          state: stateBeforeRoute,
+        });
+        expect(after.find((job) => job.id === sibling.id)).toEqual(sibling);
+        cfg.skills.workshop.reviewRunners = {};
+        await expect(reconcileSkillCollectionReviewJobs({ cron, cfg, logger })).resolves.toEqual({
+          ok: true,
+        });
+        expect(cron.getJob(owner.id)).toMatchObject({
+          agentId: "ops",
+          schedule: owner.schedule,
+          state: stateBeforeRoute,
+        });
+      } finally {
+        release.resolve();
+        if (running) {
+          await running;
+        }
+        cron.stop();
+        await testState.cleanup();
+      }
+    },
+  );
+
   it("replaces retired jobs on the current database and converges once per agent after restart", async () => {
     const testState = await createOpenClawTestState({ label: "skill-review-convergence" });
     const storePath = testState.statePath("cron", "jobs.json");

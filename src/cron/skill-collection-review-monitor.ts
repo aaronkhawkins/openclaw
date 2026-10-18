@@ -310,7 +310,7 @@ export function* resolveSkillCollectionReviewMonitorSpecs(
             : workshopEnabled && hasEligibleRuntime === false
               ? `[${SKILL_COLLECTION_REVIEW_NO_ROOTED_RUNTIME_REASON}] Skill collection review (${agentId})`
               : `Skill collection review (${agentId})`,
-        agentId: runner.agentId,
+        agentId: runner.error ? agentId : runner.agentId,
         enabled,
         schedule: {
           kind: "every",
