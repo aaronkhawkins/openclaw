@@ -634,49 +634,101 @@ describe("buildGatewayCronService", () => {
     }
   });
 
-  it("forwards cancellation, execution callbacks, and identity to collection review turns", async () => {
-    const cfg = {
-      ...createCronConfig("server-cron-skill-review-forwarding"),
-      skills: { workshop: { autonomous: { mode: "auto" } } },
-    } satisfies OpenClawConfig;
-    await withCronService(cfg, async (state) => {
-      const abortController = new AbortController();
-      const onExecutionStarted = vi.fn();
-      const onExecutionPhase = vi.fn();
-      const onLaneWait = vi.fn();
-      const executionIdentity = {
-        ingress: { kind: "schedule", boundary: "cron.test", state: "present" },
-      } satisfies CronExecutionIdentityAdmission;
-      await expect(state.reconcileSystemJobs()).resolves.toBe("converged");
-      const job = (await state.cron.list({ includeDisabled: true })).find(
-        (candidate) => candidate.declarationKey === "skill-collection-review:main",
-      );
-      if (!job) {
-        throw new Error("expected the skill collection review monitor");
-      }
-      await getCronDeps(state).runIsolatedAgentJob({
-        job,
-        deliveryAttemptFence: null,
-        message: "review",
-        abortSignal: abortController.signal,
-        onExecutionStarted,
-        onExecutionPhase,
-        onLaneWait,
-        executionIdentity,
-      });
-
-      expect(runCronIsolatedAgentTurnMock).toHaveBeenCalledWith(
-        expect.objectContaining({
+  it.each([undefined, "maintenance"])(
+    "forwards collection review ownership and callbacks with runner %s",
+    async (runnerId) => {
+      const cfg = {
+        ...createCronConfig("server-cron-skill-review-forwarding"),
+        agents: { entries: { main: {}, maintenance: { tools: { profile: "coding" } } } },
+        skills: {
+          workshop: {
+            autonomous: { mode: "auto" },
+            ...(runnerId ? { reviewRunners: { main: runnerId } } : {}),
+          },
+        },
+      } satisfies OpenClawConfig;
+      await withCronService(cfg, async (state) => {
+        const abortController = new AbortController();
+        const onExecutionStarted = vi.fn();
+        const onExecutionPhase = vi.fn();
+        const onLaneWait = vi.fn();
+        const executionIdentity = {
+          ingress: { kind: "schedule", boundary: "cron.test", state: "present" },
+        } satisfies CronExecutionIdentityAdmission;
+        await expect(state.reconcileSystemJobs()).resolves.toBe("converged");
+        const job = (await state.cron.list({ includeDisabled: true })).find(
+          (candidate) => candidate.declarationKey === "skill-collection-review:main",
+        );
+        if (!job) {
+          throw new Error("expected the skill collection review monitor");
+        }
+        await getCronDeps(state).runIsolatedAgentJob({
+          job,
+          deliveryAttemptFence: null,
+          message: "review",
           abortSignal: abortController.signal,
           onExecutionStarted,
           onExecutionPhase,
           onLaneWait,
           executionIdentity,
-          skillsSnapshot: { prompt: "", skills: [] },
-        }),
-      );
-    });
-  });
+        });
+
+        expect(runCronIsolatedAgentTurnMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            abortSignal: abortController.signal,
+            onExecutionStarted,
+            onExecutionPhase,
+            onLaneWait,
+            executionIdentity,
+            agentId: runnerId ?? "main",
+            executionRoot: expect.stringContaining(
+              `${path.sep}main${path.sep}agent${path.sep}workshop-skills`,
+            ),
+            skillsSnapshot: { prompt: "", skills: [] },
+          }),
+        );
+      });
+    },
+  );
+
+  it.each(["changed", "incapable"])(
+    "rejects a %s review route before invoking the runner",
+    async (reason) => {
+      const cfg = {
+        ...createCronConfig("server-cron-review-route-rejection"),
+        agents: {
+          entries: {
+            main: {},
+            maintenance: {
+              tools: { profile: "coding" as const, exec: { mode: "auto" as "auto" | "deny" } },
+            },
+          },
+        },
+        skills: { workshop: { reviewRunners: { main: "maintenance" } } },
+      } satisfies OpenClawConfig;
+      await withCronService(cfg, async (state) => {
+        await state.reconcileSystemJobs();
+        const job = (await state.cron.list({ includeDisabled: true })).find(
+          (candidate) => candidate.declarationKey === "skill-collection-review:main",
+        );
+        if (!job) {
+          throw new Error("expected review monitor");
+        }
+        if (reason === "changed") {
+          cfg.skills.workshop.reviewRunners.main = "main";
+        } else {
+          cfg.agents.entries.maintenance.tools.exec.mode = "deny";
+        }
+        const result = await getCronDeps(state).runIsolatedAgentJob({
+          job,
+          deliveryAttemptFence: null,
+          message: "review",
+        });
+        expect(result.status).toBe("error");
+        expect(runCronIsolatedAgentTurnMock).not.toHaveBeenCalled();
+      });
+    },
+  );
 
   it.each([
     { monitor: "heartbeat", blockedInventory: 1 },

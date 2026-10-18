@@ -324,6 +324,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "skills.load.extraDirs": "Extra Skill Directories",
   "skills.load.allowSymlinkTargets": "Allowed Skill Symlink Targets",
   "skills.load.watch": "Watch Skills",
+  "skills.workshop.reviewRunners": "Skill Workshop Review Runners",
   "skills.workshop.autonomous.mode": "Skill Workshop Autonomous Mode",
   "agents.defaults.skills": "Skills",
   "agents.defaults.subagents.delegationMode": "Sub-agent Delegation Mode",

@@ -40,7 +40,10 @@ import { cronScriptFailureMetadata } from "../cron/script-failure.js";
 import { CronService, type CronEvent } from "../cron/service.js";
 import { applyJobPatch } from "../cron/service/jobs.js";
 import { resolveCronSessionTargetSessionKey } from "../cron/session-target.js";
-import { skillCollectionReviewMonitorAgentId } from "../cron/skill-collection-review-monitor.js";
+import {
+  resolveSkillCollectionReviewRunner,
+  skillCollectionReviewMonitorAgentId,
+} from "../cron/skill-collection-review-monitor.js";
 import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
 import { cronStreamScheduleKey } from "../cron/stream-schedule.js";
 import { createCronScriptRuntime } from "../cron/trigger-script.js";
@@ -585,8 +588,19 @@ export function buildGatewayCronService(params: {
       if (reviewAgentId && resolveSkillWorkshopConfig(runtimeConfig).autonomous.mode !== "auto") {
         return { status: "skipped", summary: "Skill collection review disabled." };
       }
+      if (reviewAgentId) {
+        const runner = resolveSkillCollectionReviewRunner(runtimeConfig, reviewAgentId);
+        if (runner.error || runner.agentId !== agentId) {
+          return {
+            status: "error",
+            summary:
+              runner.error ??
+              "Workshop review route changed; reconcile system jobs before retrying.",
+          };
+        }
+      }
       const executionRoot = reviewAgentId
-        ? resolveWorkshopSkillsDir(runtimeConfig, agentId)
+        ? resolveWorkshopSkillsDir(runtimeConfig, reviewAgentId)
         : undefined;
       if (executionRoot) {
         await fs.mkdir(executionRoot, { recursive: true });

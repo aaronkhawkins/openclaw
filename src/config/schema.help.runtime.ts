@@ -529,6 +529,8 @@ export const RUNTIME_FIELD_HELP: Record<string, string> = {
     "Trusted real target roots that skill symlinks may resolve into when they sit outside their configured source root. Keep this narrow, such as a sibling repo skills directory.",
   "skills.load.watch":
     "Enable filesystem watching for skill-definition changes so updates can be applied without full process restart. Keep enabled in development workflows and disable in immutable production images.",
+  "skills.workshop.reviewRunners":
+    "Maps a Workshop owner agent ID to an existing authorized agent for weekly collection maintenance. The owner keeps its schedule and Workshop directory; the runner uses its existing tools and permissions. Invalid or incapable explicit routes are disabled with a prerequisite diagnostic.",
   "skills.workshop.autonomous.mode":
     'Controls background learning: "off" keeps only the suggestion nudge, "propose" creates pending proposals, and "auto" applies captured proposals and runs weekly review of Workshop-owned skills using ordinary file edits. Default: "auto".',
   approvals:
