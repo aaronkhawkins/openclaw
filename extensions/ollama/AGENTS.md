@@ -21,5 +21,3 @@
 - Vary credentials and non-secret tenant headers independently in cache tests.
 - For cancellation between search fallbacks, let the first response finish and
   keep the next response valid. Assert that no additional request starts.
-- Use independent literal expectations for endpoint and auth-marker defaults,
-  not the constants used by the harness under test.
