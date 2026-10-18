@@ -1235,6 +1235,7 @@
               "https://opencode.ai/zen/go",
               "https://opencode.ai/zen/go/v1",
               "https://opencode.ai/inference/go/openai/v1",
+              "https://opencode.ai/inference/go/anthropic",
               "https://opencode.ai/inference/go/anthropic/v1",
               "https://opencode.ai/inference/go/google/v1beta"
             ]
