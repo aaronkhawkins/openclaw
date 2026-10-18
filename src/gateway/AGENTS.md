@@ -25,7 +25,7 @@
 
 - Run liveness: `src/infra/agent-run-registry.ts`; worker-turn liveness: `src/gateway/worker-environments/placement-turn-claims.ts`.
 - Compose live-authority checks in one synchronous pre-commit guard.
-- Sessionless runs: retain prepared admission authority without session projection; canonical reservation owns deduplication. Source-specific RPC waits end only on that source's replay publication, never lifecycle completion/another source. Bind abort maps only for registered projected runs.
+- Sessionless runs: retain prepared admission authority without session projection; canonical reservation owns deduplication. Source-specific RPC waits end only on that source's replay publication, never lifecycle completion/another source. Cancellation targets captured controller source ownership.
 - Worker launch/recovery/reclaim/RPC: exact live placement, environment, owner epoch, placement generation, turn claim required.
 - Incompatible execution-context dialects: Reject/reprovision; never legacy payloads, local downgrade, or revived pre-restart claims.
 
